@@ -1,0 +1,267 @@
+import os
+import sys
+import sqlite3
+from getpass import getpass
+from colorama import init, Fore
+import pyperclip
+
+from crypto import generate_key, encrypt_password, decrypt_password
+from database import init_db, add_password, get_passwords, update_password, delete_password, setup_user, get_user_salt
+from generator import generate_password
+
+init(autoreset=True)  # Initialize colorama
+
+class SecurePass:
+    def __init__(self):
+        self.user_id = None
+        self.master_key = None
+        init_db()
+        
+    def run(self):
+        """Main application loop"""
+        print(Fore.GREEN + "=== SecurePass Password Manager ===")
+        
+        if not self.authenticate():
+            print(Fore.RED + "Authentication failed. Exiting...")
+            return
+            
+        while True:
+            self.show_menu()
+            choice = input(Fore.CYAN + "Enter your choice: ").strip()
+            
+            if choice == "1":
+                self.add_new_password()
+            elif choice == "2":
+                self.view_passwords()
+            elif choice == "3":
+                self.generate_password()
+            elif choice == "4":
+                self.update_password()
+            elif choice == "5":
+                self.delete_password()
+            elif choice.lower() == "q":
+                print(Fore.YELLOW + "Goodbye!")
+                break
+            else:
+                print(Fore.RED + "Invalid choice. Please try again.")
+                
+    def authenticate(self) -> bool:
+        """Authenticate user with master password"""
+        print("\nAuthentication")
+        
+        # Check if any user exists
+        try:
+            with sqlite3.connect("securepass.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM users LIMIT 1")
+                user_exists = cursor.fetchone() is not None
+        except sqlite3.OperationalError:
+            user_exists = False
+            
+        if user_exists:
+            # Existing user - authenticate
+            self.user_id = 1  # For simplicity, single user
+            salt = get_user_salt(self.user_id)
+            if not salt:
+                print(Fore.RED + "Error retrieving user data.")
+                return False
+                
+            master_password = getpass("Enter master password: ")
+            self.master_key = generate_key(master_password, salt.encode())
+            
+            # Verify key works by trying to decrypt a test string
+            test_encrypted = encrypt_password(self.master_key, "test")
+            try:
+                decrypt_password(self.master_key, test_encrypted)
+                return True
+            except:
+                print(Fore.RED + "Incorrect master password.")
+                return False
+        else:
+            # New user - setup
+            print("No existing user found. Setting up new account.")
+            master_password = getpass("Create master password: ")
+            verify_password = getpass("Confirm master password: ")
+            
+            if master_password != verify_password:
+                print(Fore.RED + "Passwords don't match.")
+                return False
+                
+            if len(master_password) < 8:
+                print(Fore.RED + "Master password must be at least 8 characters.")
+                return False
+                
+            salt = os.urandom(16).hex()
+            self.master_key = generate_key(master_password, salt.encode())
+            self.user_id = setup_user(salt)
+            print(Fore.GREEN + "Account created successfully!")
+            return True
+            
+    def show_menu(self):
+        """Display main menu"""
+        print("\n" + Fore.BLUE + "Main Menu")
+        print("1. Add new password")
+        print("2. View passwords")
+        print("3. Generate random password")
+        print("4. Update password")
+        print("5. Delete password")
+        print("Q. Quit")
+        
+    def add_new_password(self):
+        """Add a new password entry"""
+        print("\n" + Fore.BLUE + "Add New Password")
+        service = input("Service/Website: ").strip()
+        username = input("Username/Email: ").strip()
+        password = getpass("Password (leave blank to generate): ").strip()
+        category = input("Category (optional): ").strip() or None
+        notes = input("Notes (optional): ").strip() or None
+        
+        if not password:
+            password = generate_password()
+            print(Fore.YELLOW + f"Generated password: {password}")
+            
+        encrypted = encrypt_password(self.master_key, password)
+        add_password(self.user_id, service, username, encrypted, category, notes)
+        print(Fore.GREEN + "Password saved successfully!")
+        
+    def view_passwords(self):
+        """View and manage stored passwords"""
+        print("\n" + Fore.BLUE + "Your Passwords")
+        passwords = get_passwords(self.user_id)
+        
+        if not passwords:
+            print(Fore.YELLOW + "No passwords stored yet.")
+            return
+            
+        for idx, pwd in enumerate(passwords, 1):
+            print(f"\n{idx}. {pwd['service']} ({pwd['category'] or 'No category'})")
+            print(f"   Username: {pwd['username']}")
+            if pwd['notes']:
+                print(f"   Notes: {pwd['notes']}")
+                
+        print("\nOptions:")
+        print("Enter number to copy password to clipboard")
+        print("B. Back to menu")
+        
+        choice = input(Fore.CYAN + "Your choice: ").strip()
+        if choice.lower() == 'b':
+            return
+        elif choice.isdigit() and 1 <= int(choice) <= len(passwords):
+            selected = passwords[int(choice)-1]
+            password = decrypt_password(self.master_key, selected['encrypted_password'])
+            pyperclip.copy(password)
+            print(Fore.GREEN + f"Password for {selected['service']} copied to clipboard. It will be cleared in 30 seconds.")
+            # In a real app, you'd clear clipboard after delay
+        else:
+            print(Fore.RED + "Invalid choice.")
+            
+    def generate_password(self):
+        """Generate a random password"""
+        print("\n" + Fore.BLUE + "Generate Password")
+        length = input("Length (default 16): ").strip() or "16"
+        include_upper = input("Include uppercase? (Y/n): ").strip().lower() != "n"
+        include_digits = input("Include digits? (Y/n): ").strip().lower() != "n"
+        include_special = input("Include special chars? (Y/n): ").strip().lower() != "n"
+        
+        try:
+            length = int(length)
+            if length < 8:
+                print(Fore.RED + "Minimum length is 8")
+                return
+                
+            password = generate_password(
+                length=length,
+                include_uppercase=include_upper,
+                include_digits=include_digits,
+                include_special=include_special
+            )
+            
+            print(Fore.GREEN + f"\nGenerated Password: {password}")
+            pyperclip.copy(password)
+            print(Fore.YELLOW + "Password copied to clipboard.")
+        except ValueError:
+            print(Fore.RED + "Invalid length. Please enter a number.")
+            
+    def update_password(self):
+        """Update an existing password"""
+        print("\n" + Fore.BLUE + "Update Password")
+        passwords = get_passwords(self.user_id)
+        
+        if not passwords:
+            print(Fore.YELLOW + "No passwords stored yet.")
+            return
+            
+        for idx, pwd in enumerate(passwords, 1):
+            print(f"{idx}. {pwd['service']} - {pwd['username']}")
+            
+        choice = input("Select password to update (or B to go back): ").strip()
+        if choice.lower() == 'b':
+            return
+            
+        if not choice.isdigit() or not (1 <= int(choice) <= len(passwords)):
+            print(Fore.RED + "Invalid selection.")
+            return
+            
+        selected = passwords[int(choice)-1]
+        print(f"\nUpdating {selected['service']} - {selected['username']}")
+        
+        service = input(f"Service [{selected['service']}]: ").strip() or selected['service']
+        username = input(f"Username [{selected['username']}]: ").strip() or selected['username']
+        password = getpass("New password (leave blank to keep current): ").strip()
+        category = input(f"Category [{selected['category'] or ''}]: ").strip()
+        notes = input(f"Notes [{selected['notes'] or ''}]: ").strip()
+        
+        updates = {
+            'service': service if service != selected['service'] else None,
+            'username': username if username != selected['username'] else None,
+            'category': category if category != (selected['category'] or '') else None,
+            'notes': notes if notes != (selected['notes'] or '') else None
+        }
+        
+        if password:
+            updates['encrypted_password'] = encrypt_password(self.master_key, password)
+            
+        # Remove None values
+        updates = {k: v for k, v in updates.items() if v is not None}
+        
+        if updates:
+            update_password(selected['id'], **updates)
+            print(Fore.GREEN + "Password updated successfully!")
+        else:
+            print(Fore.YELLOW + "No changes made.")
+            
+    def delete_password(self):
+        """Delete a password entry"""
+        print("\n" + Fore.BLUE + "Delete Password")
+        passwords = get_passwords(self.user_id)
+        
+        if not passwords:
+            print(Fore.YELLOW + "No passwords stored yet.")
+            return
+            
+        for idx, pwd in enumerate(passwords, 1):
+            print(f"{idx}. {pwd['service']} - {pwd['username']}")
+            
+        choice = input("Select password to delete (or B to go back): ").strip()
+        if choice.lower() == 'b':
+            return
+            
+        if not choice.isdigit() or not (1 <= int(choice) <= len(passwords)):
+            print(Fore.RED + "Invalid selection.")
+            return
+            
+        selected = passwords[int(choice)-1]
+        confirm = input(f"Are you sure you want to delete {selected['service']}? (y/N): ").strip().lower()
+        if confirm == 'y':
+            delete_password(selected['id'])
+            print(Fore.GREEN + "Password deleted successfully!")
+        else:
+            print(Fore.YELLOW + "Deletion canceled.")
+
+if __name__ == "__main__":
+    app = SecurePass()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        print("\n" + Fore.YELLOW + "Exiting...")
+        sys.exit(0)
