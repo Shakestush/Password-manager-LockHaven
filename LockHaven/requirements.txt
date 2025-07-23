@@ -1,0 +1,3 @@
+echo "cryptography==41.0.7
+pyperclip==1.8.2
+colorama==0.4.6" > requirements.txt
